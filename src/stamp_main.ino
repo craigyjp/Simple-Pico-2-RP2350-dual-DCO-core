@@ -19,6 +19,7 @@
  */
 
 #include <MIDI.h>
+#include <string.h>
 #include "hardware/timer.h"
 #include "hardware/pwm.h"
 #include "pwm_audio.h"
@@ -34,6 +35,7 @@
 #define ADC_PWM_PIN     27
 #define VELOCITY_PWM_PIN 5      /* GPIO5 - velocity CV output, RC filter: 1k + 10nF */
 #define KEYTRACK_PWM_PIN 6      /* GPIO6 - keytrack CV output, RC filter: 1k + 10nF */
+#define AFTERTOUCH_PWM_PIN 7    /* GPIO7 - aftertouch CV output, RC filter: 1k + 10nF */
 
 /* --------------------------------------------------------
  * MIDI channels (1-based)
@@ -62,16 +64,24 @@
 #define CC_LFO_FM_DEPTH     28
 #define CC_LFO_PWM_DEPTH    29
 #define CC_ADC_PWM_DEPTH    30
+#define CC_AT_FM_DEPTH      31  /* aftertouch -> FM depth               */
+#define CC_MW_FM_DEPTH      43  /* mod wheel -> FM depth                */
 
 /* DCO2 */
-#define CC_DCO2_PULSE_WIDTH 31
-#define CC_DCO2_PULSE_LEVEL 32
-#define CC_DCO2_SUB_LEVEL   33
-#define CC_DCO2_DETUNE      34  /* centre=64 -> 0 cents, range ±100  */
-#define CC_DCO2_INTERVAL    35  /* centre=64 -> 0 semitones, range ±24 */
-#define CC_DCO2_PWM_DEPTH   36  /* mod wheel PWM depth                 */
-#define CC_DCO2_LFO_PWM     37  /* LFO -> PWM depth                    */
-#define CC_DCO2_ADC_PWM     38  /* ADC PWM input depth                 */
+#define CC_DCO2_PULSE_WIDTH 33
+#define CC_DCO2_PULSE_LEVEL 34
+#define CC_DCO2_SUB_LEVEL   35
+#define CC_DCO2_DETUNE      36  /* centre=64 -> 0 cents, range ±100  */
+#define CC_DCO2_INTERVAL    37  /* centre=64 -> 0 semitones, range ±24 */
+#define CC_DCO2_PWM_DEPTH   38  /* mod wheel PWM depth                 */
+#define CC_DCO2_LFO_PWM     39  /* LFO -> PWM depth                    */
+#define CC_DCO2_ADC_PWM     40  /* ADC PWM input depth                 */
+#define CC_SYNC_MODE        41  /* sync: 0-42=off 43-84=soft 85-127=hard */
+#define CC_ENV_ATTACK       44  /* DCO2 sweep envelope attack              */
+#define CC_ENV_DECAY        45  /* DCO2 sweep envelope decay               */
+#define CC_ENV_SUSTAIN      46  /* DCO2 sweep envelope sustain level       */
+#define CC_ENV_RELEASE      47  /* DCO2 sweep envelope release             */
+#define CC_ENV_DEPTH        48  /* DCO2 sweep envelope depth (semitones)   */
 
 /* --------------------------------------------------------
  * Velocity PWM output
@@ -140,6 +150,33 @@ static void KeytrackPWM_Set(uint8_t note)
 }
 
 /* --------------------------------------------------------
+ * Aftertouch PWM CV output
+ * GPIO7, ~50kHz carrier, 8-bit resolution
+ * 0 pressure = 0V, 127 pressure = 3.3V
+ * RC filter: 1k + 10nF -> clean 0-3.3V DC
+ * -------------------------------------------------------- */
+static uint8_t  atPWMSlice = 0;
+static uint8_t  atPWMChan  = 0;
+
+static void AftertouchPWM_Init(uint8_t pin)
+{
+    gpio_set_function(pin, GPIO_FUNC_PWM);
+    atPWMSlice = pwm_gpio_to_slice_num(pin);
+    atPWMChan  = pwm_gpio_to_channel(pin);
+
+    pwm_config cfg = pwm_get_default_config();
+    pwm_config_set_clkdiv(&cfg, 11.72f);
+    pwm_config_set_wrap(&cfg, 255);
+    pwm_init(atPWMSlice, &cfg, true);
+    pwm_set_chan_level(atPWMSlice, atPWMChan, 0);
+}
+
+static void AftertouchPWM_Set(uint8_t pressure)
+{
+    pwm_set_chan_level(atPWMSlice, atPWMChan, (uint16_t)pressure * 2);
+}
+
+/* --------------------------------------------------------
  * MIDI instance on Serial1 (GPIO0=RX)
  * -------------------------------------------------------- */
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
@@ -204,6 +241,14 @@ void myControlChange(byte channel, byte cc, byte value)
             case CC_LFO_FM_DEPTH:    DCO_SetLFOFMDepth(value);      break;
             case CC_LFO_PWM_DEPTH:   DCO_SetLFOPWMDepth(value);     break;
             case CC_ADC_PWM_DEPTH:   DCO_SetADCPWMDepth(value);     break;
+            case CC_SYNC_MODE:       DCO_SetSyncMode(value);        break;
+            case CC_ENV_ATTACK:      DCO_SetEnvAttack(value);       break;
+            case CC_ENV_DECAY:       DCO_SetEnvDecay(value);        break;
+            case CC_ENV_SUSTAIN:     DCO_SetEnvSustain(value);      break;
+            case CC_ENV_RELEASE:     DCO_SetEnvRelease(value);      break;
+            case CC_ENV_DEPTH:       DCO_SetEnvSweepDepth(value);   break;
+            case CC_AT_FM_DEPTH:     DCO_SetAftertouchFMDepth(value);  break;
+            case CC_MW_FM_DEPTH:     DCO_SetModWheelFMDepth(value);    break;
             /* DCO2 */
             case CC_DCO2_PULSE_WIDTH: DCO2_SetPulseWidth(value);    break;
             case CC_DCO2_PULSE_LEVEL: DCO2_SetPulseLevel(value);    break;
@@ -227,20 +272,40 @@ void myPitchBend(byte channel, int bend)
 void myAfterTouch(byte channel, byte pressure)
 {
     if (channel == CONTROL_CHANNEL)
+    {
+        AftertouchPWM_Set(pressure);
         DCO_SetAftertouch(pressure);
+    }
 }
 
 /* --------------------------------------------------------
  * PWM audio callbacks
+ * Both DCOs processed together for sample-accurate sync
  * -------------------------------------------------------- */
+static float dco1Buf[256];
+static float dco2Buf[256];
+static bool  bufsReady = false;
+
 void PWM_CB_FillBuffer_DCO1(float *output, int len)
 {
-    DCO_Process(output, len);
+    /* process both DCOs together, store results */
+    DCO_ProcessBoth(dco1Buf, dco2Buf, len);
+    bufsReady = true;
+    memcpy(output, dco1Buf, len * sizeof(float));
 }
 
 void PWM_CB_FillBuffer_DCO2(float *output, int len)
 {
-    DCO2_Process(output, len);
+    /* DCO1 callback always runs first, just copy stored DCO2 result */
+    if (bufsReady)
+    {
+        memcpy(output, dco2Buf, len * sizeof(float));
+        bufsReady = false;
+    }
+    else
+    {
+        memset(output, 0, len * sizeof(float));
+    }
 }
 
 /* --------------------------------------------------------
@@ -256,6 +321,9 @@ void setup()
 
     /* Keytrack PWM */
     KeytrackPWM_Init(KEYTRACK_PWM_PIN);
+
+    /* Aftertouch PWM */
+    AftertouchPWM_Init(AFTERTOUCH_PWM_PIN);
 
     /* ADC */
     analogReadResolution(12);
@@ -274,8 +342,16 @@ void setup()
     DCO_Init(48000.0f);
 
     /* DCO1 defaults */
+    DCO_SetSyncMode(0);         /* sync off by default */
+    DCO_SetEnvAttack(64);       /* medium attack       */
+    DCO_SetEnvDecay(64);        /* medium decay        */
+    DCO_SetEnvSustain(80);      /* sustain at 63%      */
+    DCO_SetEnvRelease(64);      /* medium release      */
+    DCO_SetEnvSweepDepth(0);    /* sweep off until enabled */
     DCO_SetPortamento(0);       /* off by default */
     DCO_SetPortamentoRate(0);   /* fastest rate   */
+    DCO_SetAftertouchFMDepth(0);
+    DCO_SetModWheelFMDepth(0);
     DCO_SetSawLevel(100);
     DCO_SetSawCount(20);
     DCO_SetSawDetune(0);
@@ -287,7 +363,7 @@ void setup()
     DCO_SetADCPWMDepth(0);
     DCO_SetPitchBendRange(2);
     DCO_SetLFORate(20);
-    DCO_SetLFOWaveform(0);      /* triangle */
+    DCO_SetLFOWaveform(127);    /* sawtooth */
     DCO_SetLFOFMDepth(0);
     DCO_SetLFOPWMDepth(0);
 

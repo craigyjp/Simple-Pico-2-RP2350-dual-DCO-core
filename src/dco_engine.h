@@ -70,8 +70,10 @@ void DCO_SetSubLevel(uint8_t value);        /* 0-127, one octave down square */
 /* --------------------------------------------------------
  * MIDI Modulation
  * -------------------------------------------------------- */
-void DCO_SetModWheel(uint8_t value);        /* 0-127, routes to FM and PWM */
-void DCO_SetAftertouch(uint8_t value);      /* 0-127, routes to FM */
+void DCO_SetModWheel(uint8_t value);        /* 0-127, pressure value */
+void DCO_SetModWheelFMDepth(uint8_t value);  /* 0-127, mod wheel -> FM depth */
+void DCO_SetAftertouch(uint8_t value);      /* 0-127, pressure value */
+void DCO_SetAftertouchFMDepth(uint8_t value); /* 0-127, aftertouch -> FM depth */
 
 /* --------------------------------------------------------
  * ADC modulation inputs
@@ -92,6 +94,21 @@ void DCO_SetLFOFMDepth(uint8_t value);      /* 0-127, LFO -> FM pitch depth */
 void DCO_SetLFOPWMDepth(uint8_t value);     /* 0-127, LFO -> PWM depth */
 
 /* --------------------------------------------------------
+ * Oscillator sync
+ * -------------------------------------------------------- */
+void DCO_SetSyncMode(uint8_t value);        /* 0-42=off, 43-84=soft, 85-127=hard */
+
+/* --------------------------------------------------------
+ * DCO2 sweep envelope (ADSR)
+ * Triggered by NoteOn/NoteOff, sweeps DCO2 pitch upward
+ * -------------------------------------------------------- */
+void DCO_SetEnvAttack(uint8_t value);       /* 0-127, 0=slow 127=fast */
+void DCO_SetEnvDecay(uint8_t value);        /* 0-127, 0=slow 127=fast */
+void DCO_SetEnvSustain(uint8_t value);      /* 0-127, sustain level */
+void DCO_SetEnvRelease(uint8_t value);      /* 0-127, 0=slow 127=fast */
+void DCO_SetEnvSweepDepth(uint8_t value);   /* 0-127, max sweep = depth * 12 semitones */
+
+/* --------------------------------------------------------
  * Audio processing - DCO1
  * -------------------------------------------------------- */
 void DCO_Process(float *output, int len);   /* output range -1.0 to +1.0 */
@@ -110,6 +127,7 @@ void DCO2_SetDetune(uint8_t value);         /* 0-127, centre=64 -> 0 cents, rang
 void DCO2_SetInterval(uint8_t value);       /* 0-127, centre=64 -> 0 semitones, range ±24 */
 void DCO2_Process(float *output, int len);  /* output range -1.0 to +1.0 */
 
-
+/* Use this instead of DCO_Process + DCO2_Process when sync is active */
+void DCO_ProcessBoth(float *out1, float *out2, int len);
 
 #endif /* DCO_ENGINE_H_ */

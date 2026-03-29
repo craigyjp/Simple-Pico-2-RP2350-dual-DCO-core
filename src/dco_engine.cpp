@@ -105,6 +105,25 @@ static float    dco2Detune      = 0.0f;   /* cents, -100 to +100 */
 static int8_t   dco2Interval    = 0;      /* semitones, -24 to +24 */
 static float    dco2PitchRatio  = 1.0f;   /* combined detune+interval ratio */
 
+/* --- Oscillator Sync --- */
+#define SYNC_OFF    0
+#define SYNC_SOFT   1
+#define SYNC_HARD   2
+static uint8_t  syncMode        = SYNC_OFF;
+static bool     dco1ResetFlag   = false;   /* set when DCO1 saw resets this buffer */
+
+/* --- DCO2 Sweep Envelope (ADSR) --- */
+typedef enum { ENV_IDLE, ENV_ATTACK, ENV_DECAY, ENV_SUSTAIN, ENV_RELEASE } EnvState;
+
+static EnvState envState       = ENV_IDLE;
+static float    envOutput      = 0.0f;   /* 0.0 - 1.0 */
+static float    envAttackRate  = 0.0f;   /* per sample increment */
+static float    envDecayRate   = 0.0f;   /* per sample decrement */
+static float    envSustainLevel= 0.8f;   /* 0.0 - 1.0 */
+static float    envReleaseRate = 0.0f;   /* per sample decrement */
+static float    envSweepDepth  = 0.0f;   /* 0.0 - 1.0, scales semitone range */
+static float    dco2SweepRatio = 1.0f;   /* pitch ratio from envelope */
+
 /* --- Pitch --- */
 static float    sampleRate      = 48000.0f;
 static float    baseFreq        = 0.0f;
@@ -121,7 +140,9 @@ static float    targetFreq      = 0.0f;     /* target frequency from NoteOn */
 
 /* --- MIDI Modulation --- */
 static float    modWheel        = 0.0f;     /* 0.0 - 1.0 */
+static float    modWheelFMDepth = 0.0f;     /* 0.0 - 1.0, mod wheel -> FM depth */
 static float    aftertouch      = 0.0f;     /* 0.0 - 1.0 */
+static float    atFMDepth       = 0.0f;     /* 0.0 - 1.0, aftertouch -> FM depth */
 
 /* --- ADC Modulation --- */
 static float    adcFM           = 0.0f;     /* -1.0 to +1.0 */
@@ -167,10 +188,6 @@ static float lfoTick(void)
             break;
     }
 
-    lfoPhase += lfoPhaseInc;
-    if (lfoPhase >= 1.0f)
-        lfoPhase -= 1.0f;
-
     return out;
 }
 
@@ -193,6 +210,8 @@ static void recalcPhaseIncs(void)
     pulsePhaseInc = freq / sampleRate;
     subPhaseInc   = (freq * 0.5f) / sampleRate;
 
+    /* dco2SweepRatio is applied per-sample in DCO2_Process
+     * so recalcPhaseIncs only uses the static pitch offset */
     float freq2      = freq * dco2PitchRatio;
     dco2PulseInc     = freq2 / sampleRate;
     dco2SubInc       = (freq2 * 0.5f) / sampleRate;
@@ -255,6 +274,18 @@ void DCO_Init(float sample_rate)
     dco2Interval   = 0;
     dco2PitchRatio = 1.0f;
 
+    syncMode       = SYNC_OFF;
+    dco1ResetFlag  = false;
+
+    envState       = ENV_IDLE;
+    envOutput      = 0.0f;
+    envAttackRate  = 0.001f;  /* ~1s attack default */
+    envDecayRate   = 0.002f;  /* ~0.5s decay default */
+    envSustainLevel= 0.8f;
+    envReleaseRate = 0.001f;  /* ~1s release default */
+    envSweepDepth  = 0.0f;
+    dco2SweepRatio = 1.0f;
+
     baseFreq     = 0.0f;
     currentFreq  = 0.0f;
     targetFreq   = 0.0f;
@@ -265,15 +296,18 @@ void DCO_Init(float sample_rate)
     noteActive  = false;
     currentNote = 255;
 
-    modWheel    = 0.0f;
-    aftertouch  = 0.0f;
+    modWheel        = 0.0f;
+    modWheelFMDepth = 0.0f;
+    aftertouch      = 0.0f;
+    atFMDepth       = 0.0f;
     adcFM       = 0.0f;
     adcPWM      = 0.0f;
     fmDepth     = 0.0f;
+    adcPWMDepth = 0.0f;
 
-    lfoPhase    = 0.0f;
+    lfoPhase    = 0.5f;   /* sawtooth at 0.5 = 0 output */
     lfoPhaseInc = LFO_RATE_MIN / sample_rate;
-    lfoWaveform = LFO_TRIANGLE;
+    lfoWaveform = LFO_SAWTOOTH;
     lfoFMDepth  = 0.0f;
     lfoPWMDepth = 0.0f;
     lfoOutput   = 0.0f;
@@ -287,6 +321,7 @@ void DCO_NoteOn(uint8_t note, uint8_t vel)
     (void)vel;          /* velocity unused - DCO runs at constant level */
     currentNote = note;
     noteActive  = true;
+    envState    = ENV_ATTACK;   /* trigger sweep envelope */
     targetFreq  = noteToFreq(note);
     baseFreq    = targetFreq;
     if (!portoEnabled)
@@ -386,9 +421,19 @@ void DCO_SetModWheel(uint8_t value)
     modWheel = (float)value / 127.0f;
 }
 
+void DCO_SetModWheelFMDepth(uint8_t value)
+{
+    modWheelFMDepth = (float)value / 127.0f;
+}
+
 void DCO_SetAftertouch(uint8_t value)
 {
     aftertouch = (float)value / 127.0f;
+}
+
+void DCO_SetAftertouchFMDepth(uint8_t value)
+{
+    atFMDepth = (float)value / 127.0f;
 }
 
 /* --------------------------------------------------------
@@ -433,6 +478,17 @@ void DCO_SetLFOWaveform(uint8_t value)
     if      (value < 43)  lfoWaveform = LFO_TRIANGLE;
     else if (value < 85)  lfoWaveform = LFO_SQUARE;
     else                  lfoWaveform = LFO_SAWTOOTH;
+
+    /* reset phase and smoother to neutral on waveform change
+     * triangle at 0.25 = 0 output, square/saw at 0.5 = 0 output */
+    if (lfoWaveform == LFO_TRIANGLE)
+        lfoPhase = 0.25f;
+    else if (lfoWaveform == LFO_SQUARE)
+        lfoPhase = 0.0f;    /* starts +1 but smoother handles transition */
+    else
+        lfoPhase = 0.5f;    /* sawtooth at 0.5 = 0 output */
+
+    lfoOutput   = 0.0f;
 }
 
 void DCO_SetLFOFMDepth(uint8_t value)
@@ -467,6 +523,109 @@ void DCO_SetPortamentoRate(uint8_t value)
     }
     float t   = (float)value / 127.0f;
     portoRate = 0.01f * powf(0.005f, t);   /* exponential: 0.01 -> 0.00005 */
+}
+
+/* --------------------------------------------------------
+ * Envelope helper - call once per sample
+ * -------------------------------------------------------- */
+static void envTick(void)
+{
+    switch (envState)
+    {
+        case ENV_ATTACK:
+            envOutput += envAttackRate;
+            if (envOutput >= 1.0f)
+            {
+                envOutput = 1.0f;
+                envState  = ENV_DECAY;
+            }
+            break;
+
+        case ENV_DECAY:
+            envOutput -= envDecayRate;
+            if (envOutput <= envSustainLevel)
+            {
+                envOutput = envSustainLevel;
+                envState  = ENV_SUSTAIN;
+            }
+            break;
+
+        case ENV_SUSTAIN:
+            envOutput = envSustainLevel;
+            break;
+
+        case ENV_RELEASE:
+            envOutput -= envReleaseRate;
+            if (envOutput <= 0.0f)
+            {
+                envOutput = 0.0f;
+                envState  = ENV_IDLE;
+            }
+            break;
+
+        case ENV_IDLE:
+        default:
+            envOutput = 0.0f;
+            break;
+    }
+
+    /* convert envelope output to DCO2 pitch ratio
+     * full depth (1.0) sweeps +12 semitones at envOutput=1.0 */
+    float semitones = envOutput * envSweepDepth * 12.0f;
+    dco2SweepRatio  = (semitones == 0.0f) ? 1.0f : powf(2.0f, semitones / 12.0f);
+}
+
+/* --------------------------------------------------------
+ * Oscillator sync
+ * -------------------------------------------------------- */
+void DCO_SetSyncMode(uint8_t value)
+{
+    /* 0-42=off, 43-84=soft sync, 85-127=hard sync */
+    if      (value < 43)  syncMode = SYNC_OFF;
+    else if (value < 85)  syncMode = SYNC_SOFT;
+    else                  syncMode = SYNC_HARD;
+}
+
+/* --------------------------------------------------------
+ * DCO2 sweep envelope parameters
+ * Time CCs map 0-127 to rate: 0=slowest, 127=fastest
+ * Rate = 1 / (time_samples) where time ranges from ~10ms to ~10s
+ * -------------------------------------------------------- */
+static float timeToRate(uint8_t value)
+{
+    /* map 0-127 to time 10s down to 10ms exponentially
+     * rate = 1/time_in_samples */
+    float t       = (float)value / 127.0f;
+    float timeSec = 10.0f * powf(0.001f, t);   /* 10s -> 0.01s */
+    return 1.0f / (timeSec * DCO_SAMPLE_RATE);
+}
+
+void DCO_SetEnvAttack(uint8_t value)
+{
+    /* invert: 0=long attack, 127=short attack */
+    envAttackRate = timeToRate(127 - value);
+}
+
+void DCO_SetEnvDecay(uint8_t value)
+{
+    /* invert: 0=long decay, 127=short decay */
+    envDecayRate = timeToRate(127 - value);
+}
+
+void DCO_SetEnvSustain(uint8_t value)
+{
+    envSustainLevel = (float)value / 127.0f;
+}
+
+void DCO_SetEnvRelease(uint8_t value)
+{
+    /* invert: 0=long release, 127=short release */
+    envReleaseRate = timeToRate(127 - value);
+}
+
+void DCO_SetEnvSweepDepth(uint8_t value)
+{
+    envSweepDepth = (float)value / 127.0f;
 }
 
 /* --------------------------------------------------------
@@ -541,30 +700,36 @@ void DCO_Process(float *output, int len)
         recalcPhaseIncs();
     }
 
+    dco1ResetFlag = false;   /* clear sync flag at start of each buffer */
+
+    /* --- Compute LFO, FM and PWM once per buffer ---
+     * Advance LFO phase by full buffer length then sample output once.
+     * fmRatio and pwmMod hold constant for the buffer duration.
+     * This eliminates per-sample discontinuity artifacts from square/saw. */
+    /* advance LFO phase by full buffer then compute output */
+    lfoPhase += lfoPhaseInc * (float)len;
+    while (lfoPhase >= 1.0f) lfoPhase -= 1.0f;
+    lfoOutput = lfoTick();
+
+    float effectiveLFOFMDepth = lfoFMDepth + (aftertouch * atFMDepth);
+    if (effectiveLFOFMDepth > 1.0f) effectiveLFOFMDepth = 1.0f;
+
+    float fmMod = (lfoOutput * effectiveLFOFMDepth)
+                + (adcFM * fmDepth)
+                + (modWheel * modWheelFMDepth);
+    if (fmMod >  1.0f) fmMod =  1.0f;
+    if (fmMod < -1.0f) fmMod = -1.0f;
+
+    float fmRatio = (fmMod == 0.0f) ? 1.0f : powf(2.0f, fmMod * FM_SEMITONE_RANGE / 12.0f);
+
+    float pwmMod = (lfoOutput * lfoPWMDepth)
+                 + (adcPWM * adcPWMDepth)
+                 + (modWheel * pwmDepth);
+    if (pwmMod >  1.0f) pwmMod =  1.0f;
+    if (pwmMod < -1.0f) pwmMod = -1.0f;
+
     for (int n = 0; n < len; n++)
     {
-        /* --- LFO tick (triangle/square/saw - no trig functions) --- */
-        lfoOutput = lfoTick();
-
-        /* --- FM modulation ---
-         * LFO + ADC (scaled by fmDepth) + mod wheel + aftertouch
-         * fmRatio computed once per sample outside inner loops */
-        float fmMod = (lfoOutput * lfoFMDepth)
-                    + (adcFM * fmDepth)   /* zero if fmDepth=0 */
-                    + modWheel
-                    + aftertouch;
-        if (fmMod >  1.0f) fmMod =  1.0f;
-        if (fmMod < -1.0f) fmMod = -1.0f;
-
-        /* ±1.0 maps to ±FM_SEMITONE_RANGE semitones */
-        float fmRatio = powf(2.0f, fmMod * FM_SEMITONE_RANGE / 12.0f);
-
-        /* --- PWM modulation --- */
-        float pwmMod = (lfoOutput * lfoPWMDepth)
-                     + (adcPWM * adcPWMDepth)  /* zero unless depth > 0 */
-                     + (modWheel * pwmDepth);
-        if (pwmMod >  1.0f) pwmMod =  1.0f;
-        if (pwmMod < -1.0f) pwmMod = -1.0f;
 
         float sample = 0.0f;
 
@@ -583,7 +748,10 @@ void DCO_Process(float *output, int len)
 
                 sawVoices[i].phase += dt;
                 if (sawVoices[i].phase >= 1.0f)
+                {
                     sawVoices[i].phase -= 1.0f;
+                    if (i == 0) dco1ResetFlag = true;  /* track voice 0 as sync source */
+                }
             }
             sawSample /= (float)sawCount;
             sample += sawSample * sawLevel;
@@ -617,7 +785,10 @@ void DCO_Process(float *output, int len)
 
             pulsePhase += dt;
             if (pulsePhase >= 1.0f)
+            {
                 pulsePhase -= 1.0f;
+                if (sawLevel == 0.0f) dco1ResetFlag = true;  /* use pulse as sync source when saw off */
+            }
         }
 
         /* --- Sub oscillator --- */
@@ -643,34 +814,58 @@ void DCO_Process(float *output, int len)
 void DCO2_Process(float *output, int len)
 {
 
-    for (int n = 0; n < len; n++)
-    {
-        /* reuse lfoOutput computed in DCO_Process this sample
-         * DCO2_Process must be called after DCO_Process each block */
-        float fmMod = (lfoOutput * lfoFMDepth)
-                    + (adcFM * fmDepth)
-                    + modWheel
-                    + aftertouch;
-        if (fmMod >  1.0f) fmMod =  1.0f;
-        if (fmMod < -1.0f) fmMod = -1.0f;
-        float fmRatio = powf(2.0f, fmMod * FM_SEMITONE_RANGE / 12.0f);
+    /* reuse lfoOutput, fmRatio and pwmMod from DCO_Process this buffer
+     * DCO2_Process must be called immediately after DCO_Process */
+    float effectiveLFOFMDepth = lfoFMDepth + (aftertouch * atFMDepth);
+    if (effectiveLFOFMDepth > 1.0f) effectiveLFOFMDepth = 1.0f;
 
-        float pwmMod = (lfoOutput * dco2LFOPWMDepth)
+    float fmMod = (lfoOutput * effectiveLFOFMDepth)
+                + (adcFM * fmDepth)
+                + (modWheel * modWheelFMDepth);
+    if (fmMod >  1.0f) fmMod =  1.0f;
+    if (fmMod < -1.0f) fmMod = -1.0f;
+    float fmRatio = (fmMod == 0.0f) ? 1.0f : powf(2.0f, fmMod * FM_SEMITONE_RANGE / 12.0f);
+
+    float dco2pwmMod = (lfoOutput * dco2LFOPWMDepth)
                      + (adcPWM * dco2ADCPWMDepth)
                      + (modWheel * dco2PWMDepth);
-        if (pwmMod >  1.0f) pwmMod =  1.0f;
-        if (pwmMod < -1.0f) pwmMod = -1.0f;
+    if (dco2pwmMod >  1.0f) dco2pwmMod =  1.0f;
+    if (dco2pwmMod < -1.0f) dco2pwmMod = -1.0f;
+
+    for (int n = 0; n < len; n++)
+    {
 
         float sample = 0.0f;
+
+        /* --- Envelope tick --- */
+        envTick();
+
+        /* --- Oscillator sync --- */
+        if (dco1ResetFlag && syncMode != SYNC_OFF)
+        {
+            if (syncMode == SYNC_HARD)
+            {
+                /* hard sync: reset DCO2 phase to 0 */
+                dco2PulsePhase = 0.0f;
+                dco2SubPhase   = 0.0f;
+            }
+            else
+            {
+                /* soft sync: invert DCO2 phase */
+                dco2PulsePhase = 1.0f - dco2PulsePhase;
+                dco2SubPhase   = 1.0f - dco2SubPhase;
+            }
+            dco1ResetFlag = false;
+        }
 
         /* --- DCO2 Pulse --- */
         if (dco2PulseLevel > 0.0f)
         {
-            float pw = dco2PulseWidth + pwmMod * 0.49f;
+            float pw = dco2PulseWidth + dco2pwmMod * 0.49f;
             if (pw < 0.01f) pw = 0.01f;
             if (pw > 0.99f) pw = 0.99f;
 
-            float dt = dco2PulseInc * fmRatio;
+            float dt = dco2PulseInc * fmRatio * dco2SweepRatio;
             float p  = dco2PulsePhase;
 
             float v = (p < pw) ? 1.0f : -1.0f;
@@ -689,7 +884,7 @@ void DCO2_Process(float *output, int len)
         /* --- DCO2 Sub --- */
         if (dco2SubLevel > 0.0f)
         {
-            float dt = dco2SubInc * fmRatio;
+            float dt = dco2SubInc * fmRatio * dco2SweepRatio;
             float v  = (dco2SubPhase < 0.5f) ? 1.0f : -1.0f;
             sample += v * dco2SubLevel;
 
@@ -699,5 +894,172 @@ void DCO2_Process(float *output, int len)
         }
 
         output[n] = sample;
+    }
+}
+
+/* --------------------------------------------------------
+ * Combined audio processing - DCO1 and DCO2 in one loop
+ * This is required for accurate oscillator sync - both DCOs
+ * must run in the same sample loop so sync happens at the
+ * exact sample when DCO1 resets, not at buffer boundaries.
+ * Use this instead of calling DCO_Process + DCO2_Process separately.
+ * -------------------------------------------------------- */
+void DCO_ProcessBoth(float *out1, float *out2, int len)
+{
+    /* --- Portamento slew --- */
+    if (portoEnabled && currentFreq != targetFreq)
+    {
+        float ratio = targetFreq / currentFreq;
+        float step  = powf(2.0f, portoRate);
+        if (ratio > step)
+            currentFreq *= step;
+        else if (ratio < 1.0f / step)
+            currentFreq /= step;
+        else
+            currentFreq = targetFreq;
+        baseFreq = currentFreq;
+        recalcPhaseIncs();
+    }
+
+    /* --- LFO, FM and PWM once per buffer --- */
+    lfoPhase += lfoPhaseInc * (float)len;
+    while (lfoPhase >= 1.0f) lfoPhase -= 1.0f;
+    lfoOutput = lfoTick();
+
+    float effectiveLFOFMDepth = lfoFMDepth + (aftertouch * atFMDepth);
+    if (effectiveLFOFMDepth > 1.0f) effectiveLFOFMDepth = 1.0f;
+
+    float fmMod = (lfoOutput * effectiveLFOFMDepth)
+                + (adcFM * fmDepth)
+                + (modWheel * modWheelFMDepth);
+    if (fmMod >  1.0f) fmMod =  1.0f;
+    if (fmMod < -1.0f) fmMod = -1.0f;
+    float fmRatio = (fmMod == 0.0f) ? 1.0f : powf(2.0f, fmMod * FM_SEMITONE_RANGE / 12.0f);
+
+    float pwmMod1 = (lfoOutput * lfoPWMDepth)
+                  + (adcPWM * adcPWMDepth)
+                  + (modWheel * pwmDepth);
+    if (pwmMod1 >  1.0f) pwmMod1 =  1.0f;
+    if (pwmMod1 < -1.0f) pwmMod1 = -1.0f;
+
+    float pwmMod2 = (lfoOutput * dco2LFOPWMDepth)
+                  + (adcPWM * dco2ADCPWMDepth)
+                  + (modWheel * dco2PWMDepth);
+    if (pwmMod2 >  1.0f) pwmMod2 =  1.0f;
+    if (pwmMod2 < -1.0f) pwmMod2 = -1.0f;
+
+    for (int n = 0; n < len; n++)
+    {
+        /* --- Envelope tick (per sample) --- */
+        envTick();
+
+        float sample1 = 0.0f;
+        float sample2 = 0.0f;
+        bool  dco1Reset = false;
+
+        /* --- DCO1 Multi-saw --- */
+        if (sawLevel > 0.0f)
+        {
+            float sawSample = 0.0f;
+            for (int i = 0; i < sawCount; i++)
+            {
+                float p  = sawVoices[i].phase;
+                float dt = sawVoices[i].phaseInc * fmRatio;
+                float v  = 2.0f * p - 1.0f;
+                v -= polyblep(p, dt);
+                sawSample += v;
+
+                sawVoices[i].phase += dt;
+                if (sawVoices[i].phase >= 1.0f)
+                {
+                    sawVoices[i].phase -= 1.0f;
+                    if (i == 0) dco1Reset = true;
+                }
+            }
+            sawSample /= (float)sawCount;
+            sample1 += sawSample * sawLevel;
+        }
+
+        /* --- DCO1 Pulse --- */
+        if (pulseLevel > 0.0f)
+        {
+            float pw = pulseWidth + pwmMod1 * 0.49f;
+            if (pw < 0.01f) pw = 0.01f;
+            if (pw > 0.99f) pw = 0.99f;
+
+            float dt = pulsePhaseInc * fmRatio;
+            float p  = pulsePhase;
+            float v  = (p < pw) ? 1.0f : -1.0f;
+            v += polyblep(p, dt);
+            float p2 = p - pw;
+            if (p2 < 0.0f) p2 += 1.0f;
+            v -= polyblep(p2, dt);
+            sample1 += v * pulseLevel;
+
+            pulsePhase += dt;
+            if (pulsePhase >= 1.0f)
+            {
+                pulsePhase -= 1.0f;
+                if (sawLevel == 0.0f) dco1Reset = true;
+            }
+        }
+
+        /* --- DCO1 Sub --- */
+        if (subLevel > 0.0f)
+        {
+            float dt = subPhaseInc * fmRatio;
+            float v  = (subPhase < 0.5f) ? 1.0f : -1.0f;
+            sample1 += v * subLevel;
+            subPhase += dt;
+            if (subPhase >= 1.0f) subPhase -= 1.0f;
+        }
+
+        /* --- Oscillator sync - apply at exact sample of DCO1 reset --- */
+        if (dco1Reset && syncMode != SYNC_OFF)
+        {
+            if (syncMode == SYNC_HARD)
+            {
+                dco2PulsePhase = 0.0f;
+                dco2SubPhase   = 0.0f;
+            }
+            else /* SYNC_SOFT */
+            {
+                dco2PulsePhase = 1.0f - dco2PulsePhase;
+                dco2SubPhase   = 1.0f - dco2SubPhase;
+            }
+        }
+
+        /* --- DCO2 Pulse --- */
+        if (dco2PulseLevel > 0.0f)
+        {
+            float pw = dco2PulseWidth + pwmMod2 * 0.49f;
+            if (pw < 0.01f) pw = 0.01f;
+            if (pw > 0.99f) pw = 0.99f;
+
+            float dt = dco2PulseInc * fmRatio * dco2SweepRatio;
+            float p  = dco2PulsePhase;
+            float v  = (p < pw) ? 1.0f : -1.0f;
+            v += polyblep(p, dt);
+            float p2 = p - pw;
+            if (p2 < 0.0f) p2 += 1.0f;
+            v -= polyblep(p2, dt);
+            sample2 += v * dco2PulseLevel;
+
+            dco2PulsePhase += dt;
+            if (dco2PulsePhase >= 1.0f) dco2PulsePhase -= 1.0f;
+        }
+
+        /* --- DCO2 Sub --- */
+        if (dco2SubLevel > 0.0f)
+        {
+            float dt = dco2SubInc * fmRatio * dco2SweepRatio;
+            float v  = (dco2SubPhase < 0.5f) ? 1.0f : -1.0f;
+            sample2 += v * dco2SubLevel;
+            dco2SubPhase += dt;
+            if (dco2SubPhase >= 1.0f) dco2SubPhase -= 1.0f;
+        }
+
+        out1[n] = sample1;
+        out2[n] = sample2;
     }
 }
