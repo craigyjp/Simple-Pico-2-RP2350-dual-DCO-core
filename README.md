@@ -1,4 +1,4 @@
-# Dual DCO1 based around a Waveshare Zero stamp RP2350
+# Dual DCO based around a Waveshare Zero stamp RP2350
 
 I wanted to build a polysynth oscillator core with the least amount of parts and make it stable, so here is an RP2350 based dual DCO.
 
