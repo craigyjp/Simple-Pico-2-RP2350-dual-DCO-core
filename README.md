@@ -2,59 +2,89 @@
 
 I wanted to build a polysynth oscillator core with the least amount of parts and make it stable, so here is an RP2350 based dual DCO.
 
-It can create 5 waveforms, saw and super saw upto 5 oscillators deep, PW1, SUB1, PW2 and SUB2. 
+It can create 5 waveforms, SAW1 and super SAW1 upto 5 oscillators deep, PW1, SUB1, SAW2, PW2 and SUB2. 
 
 The second DCO has detune and interval settings. 
 
-Their is an onboard LFO that can modulate FM or the PW of either DCO, the PW can be set manually and you can modulate from the Mod Wheel FM or PWM. 
+There are 2 onboard LFOs that can modulate FM and the PW of either DCO, the PW can be set manually and you can modulate from the Mod Wheel FM or PWM or envelpe. 
+
+Onboard ADSR for pitch mod of DCO2 and PWM of DCO1 & 2, full ADSR and depth.
 
 There is pitchbend with a depth of 0-12 semitones and a glide function upto 20 seconds. 
+
+Hard and soft sync, plus a crossmod of DCO2 to DCO1
 
 It outputs PWM on two separate pins for DCO1 & 2, a gate signal, Velocity as PWM 0-3.3v and CV as 0.25v per octave for filter tracking etc. 
 
 It can also receive 0-3.3v centered at 1.65v for FM and PWM modulation if you desire. 
 
-Ive fixed a bug with the LFO and added portamento and soft/hard sync with an onboard Envelope to sweep DCO2
-
 I might build an 8 or 16 voice poly with it.
 
-# DCO1
-* CC_MOD_WHEEL        1
-* CC_PORTAMENTO_TIME  5   /* portamento rate                     */
-* CC_PORTAMENTO_SW    65  /* portamento on/off (>=64 on, <64 off) */
-* CC_SAW_DETUNE       17
-* CC_SAW_COUNT        18
-* CC_PULSE_WIDTH      19
-* CC_PWM_DEPTH        20
-* CC_SAW_LEVEL        21
-* CC_PULSE_LEVEL      22
-* CC_SUB_LEVEL        23
+# Summary
 
-# LFO etc
-* CC_PITCHBEND_RANGE  24
-* CC_FM_DEPTH         25
-* CC_LFO_RATE         26
-* CC_LFO_WAVEFORM     27
-* CC_LFO_FM_DEPTH     28
-* CC_LFO_PWM_DEPTH    29
-* CC_ADC_PWM_DEPTH    30
-* CC_AT_FM_DEPTH      31  /* aftertouch -> FM depth               */
-* CC_MW_FM_DEPTH      43  /* mod wheel -> FM depth                */
+* DCO1 — 5-voice multisaw + pulse + sub + all modulation
+* DCO2 — saw + pulse + sub, ±24 semitones, ±100 cents detune
+* Hard/soft oscillator sync
+* ADSR sweep envelope → DCO2 pitch + DCO1/DCO2 PWM
+* LFO1 → FM vibrato with aftertouch depth
+* LFO2 → PWM animation independently per DCO
+* X-MOD (DCO2 → DCO1 frequency)
+* Portamento
+* Pitchbend with configurable range
+* Gate, velocity, keytrack and aftertouch CV outputs
+* Full MIDI voice/control channel architecture
+
+# Performance
+#define CC_MOD_WHEEL        1   /* modulation wheel                    */
+#define CC_PORTAMENTO_TIME  5   /* portamento rate                     */
+#define CC_PORTAMENTO_SW    65  /* portamento on/off (>=64=on)         */
+#define CC_PITCHBEND_RANGE  24  /* pitchbend range 1-12 semitones      */
+
+# DCO1
+#define CC_DCO1_SAW_DETUNE  17  /* saw detune spread                   */
+#define CC_DCO1_SAW_COUNT   18  /* saw voice count 1-5                 */
+#define CC_DCO1_PULSE_WIDTH 19  /* DCO1 pulse width                    */
+#define CC_DCO1_PWM_DEPTH   20  /* DCO1 mod wheel PWM depth            */
+#define CC_DCO1_SAW_LEVEL   21  /* saw level in mix                    */
+#define CC_DCO1_PULSE_LEVEL 22  /* DCO1 pulse level in mix             */
+#define CC_DCO1_SUB_LEVEL   23  /* DCO1 sub level                      */
+
+# LFO1
+
+#define CC_LFO1_RATE        25  /* LFO1 rate 0.1-20Hz                  */
+#define CC_LFO1_WAVEFORM    26  /* LFO1 waveform tri/sq/saw            */
+#define CC_LFO1_FM_DEPTH    27  /* LFO1 -> FM depth                    */
+#define CC_AT_FM_DEPTH      28  /* aftertouch -> vibrato depth         */
+#define CC_MW_FM_DEPTH      29  /* mod wheel -> FM depth               */
+#define CC_ADC_FM_DEPTH     30  /* ADC FM input depth                  */
+#define CC_XMOD_DEPTH       53  /* X-MOD depth DCO2->DCO1 freq         */
+
+# LFO2
+
+#define CC_LFO2_RATE        31  /* LFO2 rate 0.1-20Hz                  */
+#define CC_LFO2_WAVEFORM    32  /* LFO2 waveform tri/sq/saw            */
+#define CC_DCO1_LFO2_PWM    33  /* LFO2 -> DCO1 PWM depth              */
+#define CC_DCO2_LFO2_PWM    34  /* LFO2 -> DCO2 PWM depth              */
+#define CC_DCO1_ADC_PWM     35  /* DCO1 ADC PWM input depth            */
 
 # DCO2
-* CC_DCO2_PULSE_WIDTH 33
-* CC_DCO2_PULSE_LEVEL 34
-* CC_DCO2_SUB_LEVEL   35
-* CC_DCO2_DETUNE      36  /* centre=64 -> 0 cents, range ±100  */
-* CC_DCO2_INTERVAL    37  /* centre=64 -> 0 semitones, range ±24 */
-* CC_DCO2_PWM_DEPTH   38  /* mod wheel PWM depth                 */
-* CC_DCO2_LFO_PWM     39  /* LFO -> PWM depth                    */
-* CC_DCO2_ADC_PWM     40  /* ADC PWM input depth                 */
+#define CC_DCO2_SAW_LEVEL   36  /* DCO2 sawtooth level                 */
+#define CC_DCO2_PULSE_WIDTH 37  /* DCO2 pulse width                    */
+#define CC_DCO2_PULSE_LEVEL 38  /* DCO2 pulse level                    */
+#define CC_DCO2_SUB_LEVEL   39  /* DCO2 sub level                      */
+#define CC_DCO2_PWM_DEPTH   40  /* DCO2 mod wheel PWM depth            */
+#define CC_DCO2_ADC_PWM     41  /* DCO2 ADC PWM input depth            */
+#define CC_DCO2_DETUNE      42  /* DCO2 detune cents, centre=64        */
+#define CC_DCO2_INTERVAL    43  /* DCO2 interval semitones, centre=64  */
 
-# SYNC and ADSR
-* CC_SYNC_MODE        41  /* sync: 0-42=off 43-84=soft 85-127=hard */
-* CC_ENV_ATTACK       44  /* DCO2 sweep envelope attack              */
-* CC_ENV_DECAY        45  /* DCO2 sweep envelope decay               */
-* CC_ENV_SUSTAIN      46  /* DCO2 sweep envelope sustain level       */
-* CC_ENV_RELEASE      47  /* DCO2 sweep envelope release             */
-* CC_ENV_DEPTH        48  /* DCO2 sweep envelope depth (semitones)   */
+# Sync
+#define CC_SYNC_MODE        44  /* 0-42=off 43-84=soft 85-127=hard     */
+
+# ADSR
+#define CC_ENV_ATTACK       45  /* attack  0=slow 127=fast             */
+#define CC_ENV_DECAY        46  /* decay   0=slow 127=fast             */
+#define CC_ENV_SUSTAIN      47  /* sustain level                       */
+#define CC_ENV_RELEASE      48  /* release 0=slow 127=fast             */
+#define CC_ENV_DEPTH        49  /* envelope -> DCO2 pitch depth        */
+#define CC_ENV_DCO1_PWM     50  /* envelope -> DCO1 PWM depth          */
+#define CC_ENV_DCO2_PWM     51  /* envelope -> DCO2 PWM depth          */
