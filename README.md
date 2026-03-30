@@ -35,10 +35,10 @@ I might build an 8 or 16 voice poly with it.
 * Full MIDI voice/control channel architecture
 
 # Performance
-* CC_MOD_WHEEL          1   /* modulation wheel                    */
-* CC_PORTAMENTO_TIME    5   /* portamento rate                     */
-* CC_PORTAMENTO_SW      65  /* portamento on/off (>=64=on)         */
-* CC_PITCHBEND_RANGE    24  /* pitchbend range 1-12 semitones      */
+* CC_MOD_WHEEL         1   /* modulation wheel                    */
+* CC_PORTAMENTO_TIME   5   /* portamento rate                     */
+* CC_PORTAMENTO_SW     65  /* portamento on/off (>=64=on)         */
+* CC_PITCHBEND_RANGE   24  /* pitchbend range 1-12 semitones      */
 
 # DCO1
 * CC_DCO1_SAW_DETUNE  17  /* saw detune spread                   */
