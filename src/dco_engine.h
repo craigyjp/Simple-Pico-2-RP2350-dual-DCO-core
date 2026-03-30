@@ -86,12 +86,29 @@ void DCO_SetFMDepth(uint8_t value);         /* 0-127, scales ADC FM input */
 void DCO_SetADCPWMDepth(uint8_t value);     /* 0-127, scales ADC PWM input */
 
 /* --------------------------------------------------------
+ * X-MOD - DCO2 output -> DCO1 frequency only
+ * Feed DCO2 PWM output (GPIO4) via RC filter into GPIO28 (ADC2)
+ * Centred at 1.65V = no modulation
+ * -------------------------------------------------------- */
+void DCO_SetADC_XMod(uint16_t raw);         /* GPIO28 ADC2 - X-MOD input */
+void DCO_SetXModDepth(uint8_t value);       /* 0-127, scales X-MOD depth */
+void DCO_CalibrateXMod(uint16_t raw);       /* call at startup to set zero point */
+
+/* --------------------------------------------------------
  * LFO
  * -------------------------------------------------------- */
 void DCO_SetLFORate(uint8_t value);         /* 0-127 -> 0.1Hz-20Hz exponential */
 void DCO_SetLFOWaveform(uint8_t value);     /* 0-42=triangle 43-84=square 85-127=sawtooth */
-void DCO_SetLFOFMDepth(uint8_t value);      /* 0-127, LFO -> FM pitch depth */
-void DCO_SetLFOPWMDepth(uint8_t value);     /* 0-127, LFO -> PWM depth */
+void DCO_SetLFOFMDepth(uint8_t value);      /* 0-127, LFO1 -> FM pitch depth */
+void DCO_SetLFOPWMDepth(uint8_t value);     /* 0-127, kept for compatibility */
+
+/* --------------------------------------------------------
+ * LFO2 - dedicated to PWM modulation
+ * -------------------------------------------------------- */
+void DCO_SetLFO2Rate(uint8_t value);        /* 0-127 -> 0.1Hz-20Hz exponential */
+void DCO_SetLFO2Waveform(uint8_t value);    /* 0-42=triangle 43-84=square 85-127=sawtooth */
+void DCO_SetLFO2PWMDepth(uint8_t value);    /* 0-127, LFO2 -> DCO1 PWM depth */
+void DCO_SetLFO2DCO2PWMDepth(uint8_t value); /* 0-127, LFO2 -> DCO2 PWM depth */
 
 /* --------------------------------------------------------
  * Oscillator sync
@@ -106,7 +123,9 @@ void DCO_SetEnvAttack(uint8_t value);       /* 0-127, 0=slow 127=fast */
 void DCO_SetEnvDecay(uint8_t value);        /* 0-127, 0=slow 127=fast */
 void DCO_SetEnvSustain(uint8_t value);      /* 0-127, sustain level */
 void DCO_SetEnvRelease(uint8_t value);      /* 0-127, 0=slow 127=fast */
-void DCO_SetEnvSweepDepth(uint8_t value);   /* 0-127, max sweep = depth * 12 semitones */
+void DCO_SetEnvSweepDepth(uint8_t value);    /* 0-127, envelope -> DCO2 pitch depth */
+void DCO_SetEnvDCO1PWMDepth(uint8_t value);  /* 0-127, envelope -> DCO1 PWM depth */
+void DCO_SetEnvDCO2PWMDepth(uint8_t value);  /* 0-127, envelope -> DCO2 PWM depth */
 
 /* --------------------------------------------------------
  * Audio processing - DCO1
@@ -117,10 +136,10 @@ void DCO_Process(float *output, int len);   /* output range -1.0 to +1.0 */
  * Shares note, FM modulation and LFO with DCO1
  * DCO2_Process() must be called after DCO_Process() each block
  * -------------------------------------------------------- */
+void DCO2_SetSawLevel(uint8_t value);       /* 0-127, single sawtooth */
 void DCO2_SetPulseWidth(uint8_t value);     /* 0-127 -> 1%-99% */
 void DCO2_SetPulseLevel(uint8_t value);     /* 0-127 */
 void DCO2_SetPWMDepth(uint8_t value);       /* 0-127, mod wheel PWM depth */
-void DCO2_SetLFOPWMDepth(uint8_t value);    /* 0-127, LFO -> PWM depth */
 void DCO2_SetADCPWMDepth(uint8_t value);    /* 0-127, ADC PWM input depth */
 void DCO2_SetSubLevel(uint8_t value);       /* 0-127 */
 void DCO2_SetDetune(uint8_t value);         /* 0-127, centre=64 -> 0 cents, range ±100 */
